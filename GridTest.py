@@ -107,10 +107,12 @@ class Grid(object):
             done = 1
             # tmp = sum(free_cap)+sum(action[2*self.net.gen.shape[0]:self.ActionFeature()])
             reward = (1+sum(free_cap)*self.Nline())**2-sum(action[0:Ng])-sum(action[Ng:2*Ng])+sum(action[2*Ng:self.ActionFeature()])
+            reward_com=[(1+sum(free_cap)*self.Nline())**2,-sum(action[0:Ng]),-sum(action[Ng:2*Ng]),sum(action[2*Ng:self.ActionFeature()])]
             # reward= 0.8*(sum(free_cap)/tmp) - 0.2*(sum(action[2*Ng:self.ActionFeature()])/tmp)
         else:
             reward = -((1+conditions)**2)
-        return State, reward, done
+            reward_com= [0,0,0,0]
+        return State, reward, done, reward_com
 
     def reset(self):
         self.net = copy.deepcopy(self.net_origin)

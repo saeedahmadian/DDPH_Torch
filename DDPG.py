@@ -174,17 +174,16 @@ def ddpg_update(batch_size,value_net,policy_net,target_value_net,target_policy_n
         target_param.data.copy_(
             target_param.data * (1.0 - soft_tau) + param.data * soft_tau
         )
+    return value_net,policy_net,target_value_net,target_policy_net,policy_optimizer,value_optimizer
 
 
-# env = NormalizedActions(gym.make("Pendulum-v0"))
+
 env = Grid(pn.case5())
 Ns=env.StateFeatures()[0]*env.StateFeatures()[1]
 state_dim = Ns
 action_dim = env.ActionFeature()
 ou_noise = OUNoise(action_dim)
 
-# state_dim = env.observation_space.shape[0]
-# action_dim = env.action_space.shape[0]
 hidden_dim = 256
 
 value_net = ValueNetwork(state_dim, action_dim, hidden_dim).to(device)
@@ -215,7 +214,7 @@ max_steps = 20
 frame_idx = 0
 rewards = []
 batch_size = 32
-
+reward_com=[]
 
 while frame_idx < max_frames:
     env.reset()
@@ -228,14 +227,19 @@ while frame_idx < max_frames:
     for step in range(max_steps):
         action = policy_net.get_action(state)
         action = ou_noise.get_action(action, step)
-        next_state, reward, done = env.take_action(action)
+        next_state, reward, done,reward_comps = env.take_action(action)
+        reward_com.append(reward_comps)
         next_state= next_state.reshape([-1,Ns])
         action= np.array(action).reshape([-1,action_dim])
 
         replay_buffer.push(state, action, reward, next_state, done)
         if len(replay_buffer) > batch_size:
-            ddpg_update(batch_size,value_net,policy_net,target_value_net,target_policy_net,
-                policy_optimizer,value_optimizer,replay_buffer)
+            value_net, policy_net, target_value_net, target_policy_net,policy_optimizer, value_optimizer= \
+                ddpg_update(batch_size,value_net,policy_net,target_value_net,target_policy_net,
+                            policy_optimizer,value_optimizer,replay_buffer)
+            # ddpg_update(batch_size, value_net, policy_net, target_value_net, target_policy_net,
+            #             policy_optimizer, value_optimizer, replay_buffer)
+
 
         state = next_state
         episode_reward += reward
@@ -245,6 +249,10 @@ while frame_idx < max_frames:
 
     if frame_idx % 10 == 0:
         np.save('reward', rewards)
+        np.save('reward_com', reward_com)
         print('In Episode: {}, the reward function is {}'.format(frame_idx, episode_reward))
 
     rewards.append(episode_reward)
+
+
+a= 1
