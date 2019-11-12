@@ -14,22 +14,55 @@ import pandapower.networks as pn
 use_cuda = torch.cuda.is_available()
 device = torch.device("cuda" if use_cuda else "cpu")
 
+def moving_average(signal,N=20):
+    cumsum, moving_aves = [0], []
+
+    for i, x in enumerate(signal, 1):
+        cumsum.append(cumsum[i - 1] + x)
+        if i >= N:
+            moving_ave = (cumsum[i] - cumsum[i - N]) / N
+            # can do stuff with moving_ave here
+            moving_aves.append(moving_ave)
+
+    return moving_ave
+
 
 class ReplayBuffer:
-    def __init__(self, capacity):
+    def __init__(self, capacity, limit=200, Ns=70, Na=9):
         self.capacity = capacity
         self.buffer = []
+        # np.empty([limit, 2*Ns+Na+2])
         self.position = 0
+        self.Ns= Ns
+        self.Na = Na
+        self.limit = limit
 
     def push(self, state, action, reward, next_state, done):
-        if len(self.buffer) < self.capacity:
-            self.buffer.append(None)
-        self.buffer[self.position] = (state, action, reward, next_state, done)
-        self.position = (self.position + 1) % self.capacity
-
+        # if len(self.buffer) < self.capacity:
+        #     self.buffer.append(None)
+        # self.buffer[self.position] = (state, action, reward, next_state, done)
+        # self.buffer[self.position]= np.concatenate([state, action, reward, next_state, done],axis=0)
+        self.buffer.append(np.concatenate([state, action, reward, next_state, done], axis=0))
+        # self.position = (self.position + 1) % self.capacity
+        self.position = self.position + 1
+        if self.position == self.limit:
+            self.position = 0
+            self.buffer=self.buffer[self.limit-41:]
     def sample(self, batch_size):
-        batch = random.sample(self.buffer, batch_size)
-        state, action, reward, next_state, done = map(np.stack, zip(*batch))
+        half_batch = round(batch_size/2)
+        data= np.array(self.buffer)
+        ind = data[:,self.Ns+self.Na].argsort()
+        data = data[ind[::-1]]
+        batch1=data[0:half_batch,:]
+        batch2 = np.array(random.sample(list(data[half_batch:batch_size+1,:]), half_batch))
+        batch= np.concatenate([batch1,batch2],axis=0)
+        # batch = np.array(random.sample(self.buffer,batch_size))
+        state = batch[:, 0:self.Ns]
+        action = batch[:, self.Ns:self.Ns+self.Na]
+        reward = batch[:, self.Ns+self.Na:self.Ns+self.Na+1]
+        next_state = batch[:, self.Ns+self.Na+1:self.Ns+self.Na+1+self.Ns]
+        done = batch[:,self.Ns+self.Na+1+self.Ns]
+        # state, action, reward, next_state, done = map(np.stack, zip(*batch))
         return state, action, reward, next_state, done
 
     def __len__(self):
@@ -61,7 +94,7 @@ class NormalizedActions:
 
 
 class OUNoise(object):
-    def __init__(self, action_space, mu=0.0, theta=0.15, max_sigma=0.3, min_sigma=0.3, decay_period=100000):
+    def __init__(self, action_space, mu=0.0, theta=0.15, max_sigma=0.3, min_sigma=0.3, decay_period=10):
         self.mu = mu
         self.theta = theta
         self.sigma = max_sigma
@@ -89,21 +122,36 @@ class OUNoise(object):
 
 
 class ValueNetwork(nn.Module):
-    def __init__(self, num_inputs, num_actions, hidden_size, init_w=3e-3):
+    def __init__(self, num_inputs, num_actions, hidden_size1=128,hidden_size2=256,hidden_size3=512,hidden_size4=32, init_w=3e-3):
         super(ValueNetwork, self).__init__()
 
-        self.linear1 = nn.Linear(num_inputs + num_actions, hidden_size)
-        self.linear2 = nn.Linear(hidden_size, hidden_size)
-        self.linear3 = nn.Linear(hidden_size, 1)
+        self.linear_act = nn.Linear(num_actions, hidden_size1)
+        self.linear_var = nn.Linear(num_inputs , hidden_size1)
+        # self.linear1 = nn.Linear(num_inputs + num_actions, hidden_size)
+        self.normalized = nn.BatchNorm1d(hidden_size1,affine=False)
+        self.linear1 = nn.Linear(hidden_size1, hidden_size2)
+        self.linear2 = nn.Linear(hidden_size2, hidden_size3)
+        self.linear3 = nn.Linear(hidden_size3, hidden_size4)
+        self.linear4 = nn.Linear(hidden_size4, 1)
 
+        self.linear1.weight.data.uniform_(-init_w, init_w)
+        self.linear1.bias.data.uniform_(-init_w, init_w)
+        self.linear2.weight.data.uniform_(-init_w, init_w)
+        self.linear2.bias.data.uniform_(-init_w, init_w)
         self.linear3.weight.data.uniform_(-init_w, init_w)
         self.linear3.bias.data.uniform_(-init_w, init_w)
+        self.linear4.weight.data.uniform_(-init_w, init_w)
+        self.linear4.bias.data.uniform_(-init_w, init_w)
 
     def forward(self, state, action):
-        x = torch.cat([state, action], 2)
+        # x = torch.cat([state, action], 1)
+
+        x = F.relu(self.linear_act(action)+self.linear_var(state))
+        x = self.normalized(x)
         x = F.relu(self.linear1(x))
         x = F.relu(self.linear2(x))
-        x = self.linear3(x)
+        x = F.relu(self.linear3(x))
+        x = self.linear4(x)
         return x
 
 
@@ -121,7 +169,7 @@ class PolicyNetwork(nn.Module):
     def forward(self, state):
         x = F.relu(self.linear1(state))
         x = F.relu(self.linear2(x))
-        x = F.tanh(self.linear3(x))
+        x = torch.tanh(self.linear3(x))
         return x
 
     def get_action(self, state):
@@ -142,8 +190,8 @@ def ddpg_update(batch_size,value_net,policy_net,target_value_net,target_policy_n
     state = torch.FloatTensor(state).to(device)
     next_state = torch.FloatTensor(next_state).to(device)
     action = torch.FloatTensor(action).to(device)
-    reward = torch.FloatTensor(reward).unsqueeze(1).to(device)
-    done = torch.FloatTensor(np.float32(done)).unsqueeze(1).to(device)
+    reward = torch.FloatTensor(reward).to(device)
+    done = torch.FloatTensor(done).unsqueeze(1).to(device)
 
     policy_loss = value_net(state, policy_net(state))
     policy_loss = -policy_loss.mean()
@@ -154,6 +202,7 @@ def ddpg_update(batch_size,value_net,policy_net,target_value_net,target_policy_n
     expected_value = torch.clamp(expected_value, min_value, max_value)
     # ss = torch.reshape(state, [-1, 70])
     value = value_net(state, action)
+
     criterion=nn.MSELoss()
     value_loss = criterion(value, expected_value.detach())
 
@@ -174,7 +223,7 @@ def ddpg_update(batch_size,value_net,policy_net,target_value_net,target_policy_n
         target_param.data.copy_(
             target_param.data * (1.0 - soft_tau) + param.data * soft_tau
         )
-    return value_net,policy_net,target_value_net,target_policy_net,policy_optimizer,value_optimizer
+    return value_net,policy_net,target_value_net,target_policy_net,policy_optimizer,value_optimizer,value_loss,policy_loss
 
 
 
@@ -188,6 +237,11 @@ hidden_dim = 256
 
 value_net = ValueNetwork(state_dim, action_dim, hidden_dim).to(device)
 policy_net = PolicyNetwork(state_dim, action_dim, hidden_dim).to(device)
+
+
+best_value_net = ValueNetwork(state_dim, action_dim, hidden_dim).to(device)
+best_policy_net = PolicyNetwork(state_dim, action_dim, hidden_dim).to(device)
+path = '/model'
 
 target_value_net = ValueNetwork(state_dim, action_dim, hidden_dim).to(device)
 target_policy_net = PolicyNetwork(state_dim, action_dim, hidden_dim).to(device)
@@ -204,7 +258,7 @@ policy_lr = 1e-4
 value_optimizer = optim.Adam(value_net.parameters(), lr=value_lr)
 policy_optimizer = optim.Adam(policy_net.parameters(), lr=policy_lr)
 
-value_criterion = nn.MSELoss()
+
 
 replay_buffer_size = 1000000
 replay_buffer = ReplayBuffer(replay_buffer_size)
@@ -213,12 +267,18 @@ max_frames = 24000
 max_steps = 20
 frame_idx = 0
 rewards = []
-batch_size = 32
+batch_size = 40
 reward_com=[]
+
+best_reward_per_ep = 0
+
+value_net_loss=[]
+policy_net_loss=[]
 
 while frame_idx < max_frames:
     env.reset()
-    state = env.InitState().reshape([-1, Ns])
+    # state = env.InitState().reshape([-1, Ns])
+    state = env.InitState().reshape(Ns)
     ind = np.random.choice(np.arange(env.net.line.shape[0]))
     env.Attack(ind)
     ou_noise.reset()
@@ -229,24 +289,38 @@ while frame_idx < max_frames:
         action = ou_noise.get_action(action, step)
         next_state, reward, done,reward_comps = env.take_action(action)
         reward_com.append(reward_comps)
-        next_state= next_state.reshape([-1,Ns])
-        action= np.array(action).reshape([-1,action_dim])
+        next_state = next_state.reshape(Ns)
+        reward = np.array(reward).reshape(1)
+        done = np.array(done).reshape(1)
+        # next_state= next_state.reshape([-1,Ns])
 
+        # action= np.array(action).reshape([-1,action_dim])
         replay_buffer.push(state, action, reward, next_state, done)
-        if len(replay_buffer) > batch_size:
-            value_net, policy_net, target_value_net, target_policy_net,policy_optimizer, value_optimizer= \
+
+        if replay_buffer.position % batch_size == 0:
+            value_net, policy_net, target_value_net, target_policy_net,policy_optimizer, value_optimizer,v_loss,p_loss= \
                 ddpg_update(batch_size,value_net,policy_net,target_value_net,target_policy_net,
                             policy_optimizer,value_optimizer,replay_buffer)
+            value_net_loss.append(float(v_loss.item()))
+            policy_net_loss.append(float(p_loss.item()))
             # ddpg_update(batch_size, value_net, policy_net, target_value_net, target_policy_net,
             #             policy_optimizer, value_optimizer, replay_buffer)
-
-
         state = next_state
         episode_reward += reward
-        frame_idx += 1
-        if done:
+
+        if done[0]==1:
+            if episode_reward > best_reward_per_ep:
+                best_reward_per_ep = episode_reward
+                best_value_net = value_net
+                best_policy_net = policy_net
+                torch.save(best_value_net.state_dict(), path)
+                torch.save(best_policy_net.state_dict(), path)
+            print('In Episode {}, step {}, we reached to terminal with total episode reward function : {} '
+                  'and best reward is : {}'.
+                  format(frame_idx, step,episode_reward,best_reward_per_ep))
             break
 
+    frame_idx += 1
     if frame_idx % 10 == 0:
         np.save('reward', rewards)
         np.save('reward_com', reward_com)

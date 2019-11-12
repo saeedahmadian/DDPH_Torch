@@ -56,6 +56,8 @@ class Grid(object):
 
     def InitState(self):
         pp.runpp(self.net,algorithm='nr', numba= False)
+        tmp, _, _, _ = self.assessment(self.net, self.max_loading, self.Vbusmax, self.Vbusmin)
+        self.base_cap= sum(tmp)
         return self.LftoState(self.net)
 
     def Nline(self):
@@ -67,33 +69,75 @@ class Grid(object):
     def ActionFeature(self):
         return 2*self.net.gen.shape[0] + self.net.load.shape[0]
 
-    # def attack(self,n):
-    #     self.net.line.in_service[n] = False
 
     def take_action(self,action):
         Ng= self.net.res_gen.vm_pu.values.shape[0]
-        self.net.gen.vm_pu= self.net.res_gen.vm_pu.values + np.array([action[i]*(self.Vbusmax-self.net.res_gen.vm_pu.values[i])
-                                                             if action[i]>0 else action[i]*(self.net.res_gen.vm_pu.values[i]-self.Vbusmin)
-                                                             for i in range(Ng)])
+        Nload= self.net.load.scaling.shape[0]
 
-        # self.net.gen.vm_pu = self.net.res_gen.vm_pu + \
-        #                      action[0:self.net.gen.shape[0]]*(self.Vbusmax-self.net.res_gen.vm_pu)
+        # self.net.gen.vm_pu= self.net.res_gen.vm_pu.values + np.array([action[i]*(self.Vbusmax-self.net.res_gen.vm_pu.values[i])
+        #                                                      if action[i]>0 else action[i]*(self.net.res_gen.vm_pu.values[i]-self.Vbusmin)
+        #                                                      for i in range(Ng)])
+        delta_vg = np.array(action[0:Ng]*(self.Vbusmax-self.Vbusmin))
+        v_before = self.net.res_gen.vm_pu.values
+        self.net.gen.vm_pu = self.net.res_gen.vm_pu.values + delta_vg
+        v_now = self.net.gen.vm_pu.values
+        delta_vg_perc = (v_now - v_before) / v_before
+
+        voltage_punish= 0
+        for i in range(Ng):
+            if self.net.gen.vm_pu[i] > self.Vbusmax:
+                voltage_punish = voltage_punish + self.Vbusmax-self.net.gen.vm_pu[i]
+                self.net.gen.vm_pu[i] = self.Vbusmax
+            elif self.net.gen.vm_pu[i] < self.Vbusmin:
+                voltage_punish = voltage_punish + self.Vbusmin-self.net.gen.vm_pu[i]
+                self.net.gen.vm_pu[i] = self.Vbusmin
+
         print('Network new Voltages are :----> \n')
         print(self.net.gen.vm_pu)
 
-        # self.net.gen.p_mw = self.net.res_gen.p_mw + \
-        #                     action[self.net.gen.shape[0]:2*self.net.gen.shape[0]]*(self.net.gen.max_p_mw-self.net.res_gen.p_mw)
 
-        self.net.gen.p_mw = self.net.res_gen.p_mw.values +np.array([action[i+Ng]*(self.net.gen.max_p_mw.values[i]-self.net.res_gen.p_mw[i])
-                                                            if action[i+Ng] > 0 else
-                                                            action[i+Ng] * (self.net.res_gen.p_mw[i]-self.net.gen.min_p_mw.values[i])
-                                                            for i in range(Ng)])
+        # self.net.gen.p_mw = self.net.res_gen.p_mw.values +np.array([action[i+Ng]*(self.net.gen.max_p_mw.values[i]-self.net.res_gen.p_mw[i])
+        #                                                     if action[i+Ng] > 0 else
+        #                                                     action[i+Ng] * (self.net.res_gen.p_mw[i]-self.net.gen.min_p_mw.values[i])
+        #                                                     for i in range(Ng)])
+
+        delta_pg = np.array(action[Ng:2*Ng]*(self.net.gen.max_p_mw-(self.net.gen.max_p_mw/3)))
+        p_before =  self.net.res_gen.p_mw.values
+        self.net.gen.p_mw = self.net.res_gen.p_mw.values + delta_pg
+        p_now = self.net.gen.p_mw.values
+        delta_pg_perc = (p_now - p_before) / p_before
+
+        power_punish= 0
+        for i in range(Ng):
+            if self.net.gen.p_mw[i] > self.net.gen.max_p_mw[i]:
+                power_punish = power_punish+ (self.net.gen.p_mw[i]-self.net.gen.max_p_mw[i])/(self.net.gen.max_p_mw[i])
+                self.net.gen.p_mw[i] = self.net.gen.max_p_mw[i]
+            elif self.net.gen.p_mw[i] < self.net.gen.max_p_mw[i]/3:
+                power_punish = power_punish + (self.net.gen.max_p_mw[i]/3)-self.net.gen.p_mw[i]/(self.net.gen.max_p_mw[i]/3)
+                self.net.gen.p_mw[i] = self.net.gen.max_p_mw[i]/3
+
         print('Network new Active Power are :----> \n')
         print(self.net.gen.p_mw)
 
-        self.net.load.scaling = self.net.load.scaling.values - \
-                                np.array([action[2*Ng+i]*self.max_shedding if self.net.load.scaling.values[i]-action[2*Ng+i]*self.max_shedding>0 else 0
-                                for i in range(Ng)])
+        # self.net.load.scaling = self.net.load.scaling.values - \
+        #                         np.array([action[2*Ng+i]*self.max_shedding if self.net.load.scaling.values[i]-action[2*Ng+i]*self.max_shedding>0 else 0
+        #                         for i in range(Ng)])
+        delta_d = np.array(action[2*Ng:2*Ng+Nload]*self.max_shedding)
+        d_before = self.net.load.scaling.values
+        self.net.load.scaling = self.net.load.scaling.values + delta_d
+
+        d_now = self.net.load.scaling.values
+
+        delta_d_perc = (d_now - d_before) / d_before
+
+        load_punish = 0
+        for i in range(Nload):
+            if self.net.load.scaling[i] > 1+self.max_shedding:
+                load_punish=load_punish + (self.net.load.scaling[i] - (1+self.max_shedding))
+                self.net.load.scaling[i] = 1+self.max_shedding
+            elif self.net.load.scaling[i] < 1-self.max_shedding:
+                load_punish = load_punish + (1-self.max_shedding)-self.net.load.scaling[i]
+                self.net.load.scaling[i] = 1 - self.max_shedding
 
 
         # self.net.load.scaling = self.net.load.scaling.values - np.array(action[2*Ng:self.ActionFeature()])*self.max_shedding
@@ -102,15 +146,29 @@ class Grid(object):
         State = self.LftoState(self.net)
         free_cap, overload, overvoltage, undervoltage = self.assessment(self.net, self.max_loading, self.Vbusmax, self.Vbusmin)
         conditions = sum(overload) + sum(overvoltage) + sum(undervoltage)
+        punish_total = voltage_punish + power_punish+ load_punish
+        print('<<------The punishments are : -------->>')
+        print([voltage_punish, power_punish, load_punish])
         done = 0
         if conditions == 0:
             done = 1
-            # tmp = sum(free_cap)+sum(action[2*self.net.gen.shape[0]:self.ActionFeature()])
-            reward = (1+sum(free_cap)*self.Nline())**2-sum(action[0:Ng])-sum(action[Ng:2*Ng])+sum(action[2*Ng:self.ActionFeature()])
-            reward_com=[(1+sum(free_cap)*self.Nline())**2,-sum(action[0:Ng]),-sum(action[Ng:2*Ng]),sum(action[2*Ng:self.ActionFeature()])]
+
+            # tmp = abs(sum(free_cap))+ abs(sum(delta_vg_perc*action[0:Ng]))+abs(sum(delta_pg_perc*action[Ng:2*Ng]))+\
+            #       abs(sum(delta_d_perc*action[2*Ng:2*Ng+Nload]))+abs(punish_total)
+
+
+            reward = 1*(sum(free_cap)/self.base_cap)-1*(sum(delta_vg_perc*action[0:Ng])/self.base_cap)-1*(sum(delta_pg_perc*action[Ng:2*Ng])/self.base_cap)\
+                     +1*(sum(delta_d_perc*action[2*Ng:2*Ng+Nload])/self.base_cap)
+
+            # -1 * (punish_total / self.base_cap)
+
+
+            reward_com=[sum(free_cap), sum(delta_vg_perc*action[0:Ng]), sum(delta_pg_perc*action[Ng:2*Ng]), sum(delta_d_perc*action[2*Ng:2*Ng+Nload])]
             # reward= 0.8*(sum(free_cap)/tmp) - 0.2*(sum(action[2*Ng:self.ActionFeature()])/tmp)
         else:
-            reward = -((1+conditions)**2)
+            reward = -((conditions))/(self.base_cap)
+                     # -sum(action[0:Ng])-sum(action[Ng:2*Ng])+sum(action[2*Ng:self.ActionFeature()])-\
+                     # (voltage_punish +power_punish+ load_punish)
             reward_com= [0,0,0,0]
         return State, reward, done, reward_com
 
