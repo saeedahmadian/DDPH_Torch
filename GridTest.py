@@ -13,7 +13,7 @@ net = pn.case5()
 
 
 class Grid(object):
-    def __init__(self, net,max_loading=1, Vbusmax=1.03, Vbusmin=0.98, max_shedding =0.2):
+    def __init__(self, net,max_loading=1, Vbusmax=1.03, Vbusmin=0.98, max_shedding =0.2, T_max=21):
         """
         Initialize the environment
         :param net: Power grid (for example IEEE 24-bus)
@@ -27,6 +27,9 @@ class Grid(object):
         self.Vbusmax = Vbusmax
         self.Vbusmin = Vbusmin
         self.max_shedding = max_shedding
+        self.T_max= T_max
+        self.t= 0
+        self.reward_neg = 0
 
     def LftoState(self,grid):
         # pp.runpp(grid, lumba=False)
@@ -57,7 +60,11 @@ class Grid(object):
     def InitState(self):
         pp.runpp(self.net,algorithm='nr', numba= False)
         tmp, _, _, _ = self.assessment(self.net, self.max_loading, self.Vbusmax, self.Vbusmin)
-        self.base_cap= sum(tmp)
+        self.base_cap= copy.deepcopy(sum(tmp))
+        tmp = sum(self.net.res_gen.p_mw.values)
+        self.base_power = copy.deepcopy(tmp)
+        self.base_voltage = copy.deepcopy(sum(self.net.res_gen.vm_pu.values))
+        self.base_load = copy.deepcopy(sum(self.net.load.scaling.values))
         return self.LftoState(self.net)
 
     def Nline(self):
@@ -143,12 +150,16 @@ class Grid(object):
         # self.net.load.scaling = self.net.load.scaling.values - np.array(action[2*Ng:self.ActionFeature()])*self.max_shedding
         # self.net.load.q_mvar = action[2*self.net.gen.shape[0]:self.ActionFeature()]
         pp.runpp(self.net,'nr',lumba=False)
+        self.t = self.t +1
         State = self.LftoState(self.net)
         free_cap, overload, overvoltage, undervoltage = self.assessment(self.net, self.max_loading, self.Vbusmax, self.Vbusmin)
         conditions = sum(overload) + sum(overvoltage) + sum(undervoltage)
         punish_total = voltage_punish + power_punish+ load_punish
+        print('<<------Base values are are : -------->>')
+        print ([self.base_cap, self.base_voltage,self.base_power,self.base_load])
         print('<<------The punishments are : -------->>')
         print([voltage_punish, power_punish, load_punish])
+
         done = 0
         if conditions == 0:
             done = 1
@@ -157,8 +168,9 @@ class Grid(object):
             #       abs(sum(delta_d_perc*action[2*Ng:2*Ng+Nload]))+abs(punish_total)
 
 
-            reward = 1*(sum(free_cap)/self.base_cap)-1*(sum(delta_vg_perc*action[0:Ng])/self.base_cap)-1*(sum(delta_pg_perc*action[Ng:2*Ng])/self.base_cap)\
-                     +1*(sum(delta_d_perc*action[2*Ng:2*Ng+Nload])/self.base_cap)
+            reward = 1*(sum(free_cap)/self.base_cap)*(self.T_max-self.t)-1*(sum(delta_vg_perc*action[0:Ng])/self.base_voltage)-1*(sum(delta_pg_perc*action[Ng:2*Ng])/self.base_power)\
+                     +1*(sum(delta_d_perc*action[2*Ng:2*Ng+Nload])/self.base_load) - abs(voltage_punish/self.base_voltage)-\
+                     abs(power_punish/self.base_power)-abs(load_punish/self.base_load)
 
             # -1 * (punish_total / self.base_cap)
 
@@ -166,7 +178,8 @@ class Grid(object):
             reward_com=[sum(free_cap), sum(delta_vg_perc*action[0:Ng]), sum(delta_pg_perc*action[Ng:2*Ng]), sum(delta_d_perc*action[2*Ng:2*Ng+Nload])]
             # reward= 0.8*(sum(free_cap)/tmp) - 0.2*(sum(action[2*Ng:self.ActionFeature()])/tmp)
         else:
-            reward = -((conditions))/(self.base_cap)
+            reward = -((conditions)/(self.base_cap))* (self.t) - abs(voltage_punish/self.base_voltage)-\
+                     abs(power_punish/self.base_power)-abs(load_punish/self.base_load)
                      # -sum(action[0:Ng])-sum(action[Ng:2*Ng])+sum(action[2*Ng:self.ActionFeature()])-\
                      # (voltage_punish +power_punish+ load_punish)
             reward_com= [0,0,0,0]
@@ -174,6 +187,8 @@ class Grid(object):
 
     def reset(self):
         self.net = copy.deepcopy(self.net_origin)
+        self.t = 0
+        self.reward_neg = 0
 
 
 

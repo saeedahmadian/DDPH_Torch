@@ -10,6 +10,7 @@ from torch.distributions import Normal
 import matplotlib.pyplot as plt
 from GridTest import Grid
 import pandapower.networks as pn
+import os
 
 use_cuda = torch.cuda.is_available()
 device = torch.device("cuda" if use_cuda else "cpu")
@@ -53,10 +54,10 @@ class ReplayBuffer:
         data= np.array(self.buffer)
         ind = data[:,self.Ns+self.Na].argsort()
         data = data[ind[::-1]]
-        batch1=data[0:half_batch,:]
+        batch=data[0:batch_size,:]
         batch2 = np.array(random.sample(list(data[half_batch:batch_size+1,:]), half_batch))
-        batch= np.concatenate([batch1,batch2],axis=0)
-        # batch = np.array(random.sample(self.buffer,batch_size))
+        # batch= np.concatenate([batch1,batch2],axis=0)
+
         state = batch[:, 0:self.Ns]
         action = batch[:, self.Ns:self.Ns+self.Na]
         reward = batch[:, self.Ns+self.Na:self.Ns+self.Na+1]
@@ -275,6 +276,21 @@ best_reward_per_ep = 0
 value_net_loss=[]
 policy_net_loss=[]
 
+if len(os.getcwd()+'/model_new') !=0:
+    value_net = torch.load(os.getcwd()+'/model_new/best_value_net')
+    policy_net = torch.load(os.getcwd()+'/model/best_policy_net')
+    target_value_net = torch.load(os.getcwd()+'/model/best_value_net')
+    target_policy_net = torch.load(os.getcwd()+'/model/best_policy_net')
+    best_value_net = torch.load(os.getcwd()+'/model/best_value_net')
+    best_policy_net = torch.load(os.getcwd()+'/model/best_policy_net')
+    value_net.eval()
+    policy_net.eval()
+    target_value_net.eval()
+    target_policy_net.eval()
+    best_value_net.eval()
+    best_policy_net.eval()
+
+
 while frame_idx < max_frames:
     env.reset()
     # state = env.InitState().reshape([-1, Ns])
@@ -311,17 +327,22 @@ while frame_idx < max_frames:
         if done[0]==1:
             if episode_reward > best_reward_per_ep:
                 best_reward_per_ep = episode_reward
-                best_value_net = value_net
-                best_policy_net = policy_net
-                torch.save(best_value_net.state_dict(), path)
-                torch.save(best_policy_net.state_dict(), path)
+                for best_param, param in zip(best_value_net.parameters(), value_net.parameters()):
+                    best_param.data.copy_(param.data)
+
+                for best_param, param in zip(best_policy_net.parameters(), policy_net.parameters()):
+                    best_param.data.copy_(param.data)
+
+                torch.save(best_value_net, os.getcwd()+'/model_new/best_value_net')
+                torch.save(best_policy_net, os.getcwd()+'/model_new/best_policy_net')
+
             print('In Episode {}, step {}, we reached to terminal with total episode reward function : {} '
                   'and best reward is : {}'.
                   format(frame_idx, step,episode_reward,best_reward_per_ep))
             break
 
     frame_idx += 1
-    if frame_idx % 10 == 0:
+    if frame_idx % 100 == 0:
         np.save('reward', rewards)
         np.save('reward_com', reward_com)
         print('In Episode: {}, the reward function is {}'.format(frame_idx, episode_reward))
